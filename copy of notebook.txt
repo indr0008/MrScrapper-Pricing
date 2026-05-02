@@ -1,0 +1,2262 @@
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+
+plt.style.use('seaborn-v0_8')
+sns.set_context('talk')
+RANDOM_SEED = 42
+
+data_path = 'ecommerce_price_prediction-train.csv'
+df = pd.read_csv(data_path, parse_dates=['capturedAt'], low_memory=False)
+print(f'Read {len(df):,} rows and {df.shape[1]} columns from {data_path}')
+df.tail()
+
+df['tag1']='TRAIN'
+
+df.shape
+
+df.duplicated().sum()
+
+duplicate_rows = df[
+    df.duplicated(keep=False)
+]
+
+duplicate_rows.head(5)
+
+df = df.drop_duplicates()
+
+df.shape
+
+test_data_path = 'ecommerce_price_prediction-test-3-days.csv'
+test__real_df = pd.read_csv(test_data_path, parse_dates=['capturedAt'], low_memory=False)
+print(f'Read {len(test__real_df):,} rows and {test__real_df.shape[1]} columns from {test_data_path}')
+test__real_df.head()
+
+
+test__real_df['tag1']='TEST'
+test__real_df.shape
+
+print('Shape:', df.shape)
+print('\nColumns:')
+print(df.columns.tolist())
+
+df.info()
+
+missing_report = df.isna().sum().to_frame('missing_count')
+missing_report['missing_pct'] = 100 * missing_report['missing_count'] / len(df)
+missing_report.sort_values(by='missing_pct', ascending=False).head(20)
+
+print('Shape:', test__real_df.shape)
+print('\nColumns:')
+print(test__real_df.columns.tolist())
+
+test__real_df.info()
+
+test__real_df['tag2'] = np.where(
+    test__real_df['price'].notna(),
+    'ANCHOR',
+    'NOT-ANCHOR'
+)
+
+df['date'] = df['capturedAt'].dt.date
+test__real_df['date'] = test__real_df['capturedAt'].dt.date
+
+
+last_date = df['date'].max()
+print(f"Last date in dataset: {last_date}")
+
+# Isolate all data from the last date as validation set
+validation_df = df[df['date'] == last_date].copy()
+train_df = df[df['date'] < last_date].copy()
+
+print(f"Training set: {len(train_df):,} rows")
+print(f"Validation set: {len(validation_df):,} rows")
+print(f"Validation set date: {validation_df['date'].unique()}")
+
+# Verify no overlap
+assert len(set(train_df['date']) & set(validation_df['date'])) == 0, "Training and validation sets have overlapping dates"
+print("✓ No date overlap between training and validation sets")
+
+
+
+train_df['tag2']= 'TRAIN'
+validation_df['tag2']= 'VALIDATION'
+
+def build_standard_time_features(df):
+    df = df.copy()
+    df['day_of_week'] = df['capturedAt'].dt.dayofweek
+    df['is_weekend'] = df['day_of_week'].isin([5, 6]).astype(int)
+    df['month'] = df['capturedAt'].dt.month
+    df['day_of_year'] = df['capturedAt'].dt.dayofyear
+    hour = df['capturedAt'].dt.hour
+    df['is_morning'] = ((hour >= 6) & (hour < 12)).astype(int)
+    df['is_afternoon'] = ((hour >= 12) & (hour < 18)).astype(int)
+    df['is_evening'] = ((hour >= 18) & (hour < 24)).astype(int)
+    return df
+
+
+
+train_df = build_standard_time_features(train_df)
+validation_df = build_standard_time_features(validation_df)
+test__real_df = build_standard_time_features(test__real_df)
+
+
+train_df['stock_available'] = train_df['stock'].notna().astype(int)
+
+train_df['brand_missing'] = train_df['brand'].isna().astype(int)
+
+train_df['brand'] = train_df['brand'].fillna('unknown')
+brand_counts = train_df['brand'].value_counts()
+
+train_df['brand_freq'] = train_df['brand'].map(brand_counts)
+
+
+# =========================================================
+# CHECK WHETHER MISSING shop_response_rate
+# IS CONCENTRATED IN SPECIFIC SHOPS
+# =========================================================
+
+response_df = train_df.copy()
+
+# missing flag
+response_df['shop_response_rate_missing'] = (
+    response_df['shop_response_rate'].isna()
+)
+
+# =========================================================
+# COUNT MISSING PER SHOP
+# =========================================================
+
+missing_by_shop = (
+    response_df.groupby('shopId')['shop_response_rate_missing']
+    .agg(['sum', 'count'])
+    .rename(columns={
+        'sum': 'missing_count',
+        'count': 'total_rows'
+    })
+)
+
+# missing percentage per shop
+missing_by_shop['missing_pct'] = (
+    missing_by_shop['missing_count']
+    / missing_by_shop['total_rows']
+)
+
+# =========================================================
+# SORT BY HIGHEST MISSING COUNT
+# =========================================================
+
+missing_by_shop_sorted = (
+    missing_by_shop
+    .sort_values(
+        by='missing_count',
+        ascending=False
+    )
+)
+
+print(missing_by_shop_sorted.head(20))
+
+train_df['shop_response_rate_missing'] = (
+    train_df['shop_response_rate'].isna().astype(int)
+)
+median_response_rate = train_df['shop_response_rate'].median()
+
+train_df['shop_response_rate'] = (
+    train_df['shop_response_rate']
+    .fillna(median_response_rate)
+)
+
+
+# =========================================================
+# SAMPLE 100 ANCHOR ROWS
+# =========================================================
+
+sample_df = validation_df.sample(
+    n=100,
+    random_state=42
+)
+
+# =========================================================
+# REMAINING ROWS (NOT IN SAMPLE)
+# =========================================================
+
+remaining_df = validation_df.drop(
+    sample_df.index
+).copy()
+
+# =========================================================
+# CHECK
+# =========================================================
+
+print("Validation rows :", len(validation_df))
+print("Sample rows     :", len(sample_df))
+print("Remaining rows  :", len(remaining_df))
+print("Total check     :", len(sample_df) + len(remaining_df))
+
+sample_df['stock_available'] = sample_df['stock'].notna().astype(int)
+
+sample_df['brand_missing'] = sample_df['brand'].isna().astype(int)
+
+
+
+
+
+sample_df['brand'] = sample_df['brand'].fillna('unknown')
+
+sample_df['brand_freq'] = (
+    sample_df['brand']
+    .map(brand_counts)
+    .fillna(0)
+)
+
+sample_df['shop_response_rate_missing'] = (
+    sample_df['shop_response_rate'].isna().astype(int)
+)
+
+sample_df['shop_response_rate'] = (
+    sample_df['shop_response_rate']
+    .fillna(median_response_rate)
+)
+
+
+
+import numpy as np
+import pandas as pd
+
+# =========================================================
+# COMBINE TRAIN + sample
+# =========================================================
+
+full_df = pd.concat([train_df, sample_df], axis=0)
+
+# preserve indices
+train_idx = train_df.index
+sample_idx = sample_df.index
+
+
+# =========================================================
+# SORT CHRONOLOGICALLY
+# VERY IMPORTANT
+# =========================================================
+
+full_df = full_df.sort_values(
+    ['shopId', 'itemId', 'modelId', 'capturedAt']
+)
+
+# =========================================================
+# GROUPS
+# =========================================================
+
+# fine-grained
+model_group = full_df.groupby(
+    ['shopId', 'itemId', 'modelId']
+)
+
+# broader fallback
+item_group = full_df.groupby(
+    ['shopId', 'itemId']
+)
+
+
+# =========================================================
+# MODEL-LEVEL SAFE LAG FEATURES
+# =========================================================
+
+# ---------------------------------------------------------
+# PREVIOUS PRICES
+# ---------------------------------------------------------
+
+full_df['model_price_last_scrape'] = (
+    model_group['price'].shift(1)
+)
+
+full_df['model_price_lag_2'] = (
+    model_group['price'].shift(2)
+)
+
+# ---------------------------------------------------------
+# HISTORY INDICATORS
+# VERY IMPORTANT
+# ---------------------------------------------------------
+
+# has at least 1 previous observation
+full_df['model_has_price_history'] = (
+    full_df['model_price_last_scrape']
+    .notna()
+    .astype(int)
+)
+
+# has at least 2 previous observations
+full_df['model_has_lag_2_history'] = (
+    full_df['model_price_lag_2']
+    .notna()
+    .astype(int)
+)
+
+# ---------------------------------------------------------
+# SAFE FILLING
+# ---------------------------------------------------------
+
+# fill AFTER creating indicators
+full_df['model_price_last_scrape'] = (
+    full_df['model_price_last_scrape']
+    .fillna(0)
+)
+
+full_df['model_price_lag_2'] = (
+    full_df['model_price_lag_2']
+    .fillna(0)
+)
+
+# =========================================================
+# TIME FEATURES
+# =========================================================
+
+full_df['model_days_since_last_scrape'] = (
+    full_df['capturedAt']
+    - model_group['capturedAt'].shift(1)
+).dt.days
+
+# ---------------------------------------------------------
+# HISTORY INDICATOR
+# ---------------------------------------------------------
+
+full_df['model_has_time_history'] = (
+    full_df['model_days_since_last_scrape']
+    .notna()
+    .astype(int)
+)
+
+# ---------------------------------------------------------
+# SAFE FILLING
+# ---------------------------------------------------------
+
+full_df['model_days_since_last_scrape'] = (
+    full_df['model_days_since_last_scrape']
+    .fillna(0)
+    .astype(int)
+)
+
+# =========================================================
+# ITEM-LEVEL EXPANDING FEATURES (LEAKAGE SAFE)
+# =========================================================
+
+# item grouping
+item_group = full_df.groupby(['shopId', 'itemId'])
+
+# =========================================================
+# HISTORICAL AVERAGE PRICE
+# =========================================================
+
+full_df['item_avg_price_hist'] = (
+    item_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    .reset_index(level=[0,1], drop=True)
+)
+
+# availability flag
+full_df['item_avg_price_hist_available'] = (
+    full_df['item_avg_price_hist']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['item_avg_price_hist'] = (
+    full_df['item_avg_price_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL MIN PRICE
+# =========================================================
+
+full_df['item_price_min_hist'] = (
+    item_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().min()
+    )
+    .reset_index(level=[0,1], drop=True)
+)
+
+# availability flag
+full_df['item_price_min_hist_available'] = (
+    full_df['item_price_min_hist']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['item_price_min_hist'] = (
+    full_df['item_price_min_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL MAX PRICE
+# =========================================================
+
+full_df['item_price_max_hist'] = (
+    item_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().max()
+    )
+    .reset_index(level=[0,1], drop=True)
+)
+
+# availability flag
+full_df['item_price_max_hist_available'] = (
+    full_df['item_price_max_hist']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['item_price_max_hist'] = (
+    full_df['item_price_max_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL VOLATILITY
+# =========================================================
+
+full_df['item_price_volatility_hist'] = (
+    item_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().std()
+    )
+    .reset_index(level=[0,1], drop=True)
+)
+
+# availability flag
+full_df['item_price_volatility_hist_available'] = (
+    full_df['item_price_volatility_hist']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['item_price_volatility_hist'] = (
+    full_df['item_price_volatility_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# HISTORICAL OBSERVATION COUNT
+# VERY USEFUL FEATURE
+# =========================================================
+
+full_df['item_hist_observation_count'] = (
+    item_group.cumcount()
+)
+
+# =========================================================
+# OPTIONAL:
+# HAS ANY HISTORY
+# =========================================================
+
+full_df['item_has_history'] = (
+    full_df['item_hist_observation_count'] > 0
+).astype(int)
+
+# =========================================================
+# MODEL-LEVEL PRICE CHANGE FEATURES (PROPER + SAFE)
+# =========================================================
+
+# ---------------------------------------------------------
+# PREVIOUS PRICE CHANGE
+# ---------------------------------------------------------
+
+full_df['model_prev_price_change'] = (
+    full_df['model_price_last_scrape']
+    - full_df['model_price_lag_2']
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# need BOTH lag1 and lag2 to exist
+# =========================================================
+
+full_df['model_prev_price_change_available'] = (
+    (
+        full_df['model_has_price_history'] == 1
+    )
+    &
+    (
+        full_df['model_has_lag_2_history'] == 1
+    )
+).astype(int)
+
+# =========================================================
+# SAFE FILL
+# first/second occurrences have no meaningful change
+# =========================================================
+
+full_df['model_prev_price_change'] = (
+    full_df['model_prev_price_change']
+    .fillna(0)
+)
+
+# =========================================================
+# PERCENTAGE CHANGE
+# =========================================================
+
+full_df['model_prev_price_change_pct'] = np.where(
+    full_df['model_has_lag_2_history'] == 1,
+    (
+        full_df['model_prev_price_change']
+        /
+        full_df['model_price_lag_2'].replace(0, 1)
+    ) * 100,
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# =========================================================
+
+full_df['model_prev_price_change_pct_available'] = (
+    full_df['model_prev_price_change_pct']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['model_prev_price_change_pct'] = (
+    full_df['model_prev_price_change_pct']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# ABSOLUTE CHANGE MAGNITUDE
+# often very useful for tree models
+# =========================================================
+
+full_df['model_prev_price_change_abs'] = (
+    full_df['model_prev_price_change']
+    .abs()
+)
+
+# =========================================================
+# OPTIONAL:
+# PRICE DIRECTION
+# =========================================================
+
+full_df['model_price_direction'] = np.sign(
+    full_df['model_prev_price_change']
+)
+
+# values:
+# -1 = price decreased
+#  0 = unchanged/no history
+# +1 = price increased
+
+
+# =========================================================
+# MODEL-LEVEL ROLLING FEATURES (LEAKAGE SAFE)
+# =========================================================
+
+# model grouping
+model_group = full_df.groupby(
+    ['shopId', 'itemId', 'modelId']
+)
+
+# =========================================================
+# ROLLING 7-OBSERVATION AVERAGE
+# =========================================================
+
+full_df['model_price_7d_avg_hist'] = (
+    model_group['price']
+    .apply(
+        lambda x: x.shift(1).rolling(
+            window=7,
+            min_periods=1
+        ).mean()
+    )
+    .reset_index(level=[0,1,2], drop=True)
+)
+
+# availability flag
+full_df['model_price_7d_avg_hist_available'] = (
+    full_df['model_price_7d_avg_hist']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['model_price_7d_avg_hist'] = (
+    full_df['model_price_7d_avg_hist']
+    .fillna(0)
+)
+
+# ===========
+
+
+# =========================================================
+# ITEM-LEVEL LAG FEATURES
+# =========================================================
+
+item_group = full_df.groupby(['shopId', 'itemId'])
+
+# ---------------------------------------------------------
+# LAGS
+# ---------------------------------------------------------
+
+full_df['item_price_last_scrape'] = (
+    item_group['price'].shift(1)
+)
+
+full_df['item_price_lag_2'] = (
+    item_group['price'].shift(2)
+)
+
+# =========================================================
+# HISTORY FLAGS
+# =========================================================
+
+full_df['item_has_price_history'] = (
+    full_df['item_price_last_scrape']
+    .notna()
+    .astype(int)
+)
+
+full_df['item_has_lag_2_history'] = (
+    full_df['item_price_lag_2']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_price_last_scrape'] = (
+    full_df['item_price_last_scrape']
+    .fillna(0)
+)
+
+full_df['item_price_lag_2'] = (
+    full_df['item_price_lag_2']
+    .fillna(0)
+)
+
+
+
+# =========================================================
+# ITEM-LEVEL PRICE CHANGE FEATURES (PROPER + SAFE)
+# =========================================================
+
+# ---------------------------------------------------------
+# PREVIOUS PRICE CHANGE
+# ---------------------------------------------------------
+
+full_df['item_prev_price_change'] = (
+    full_df['item_price_last_scrape']
+    - full_df['item_price_lag_2']
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# need BOTH lag1 and lag2 to exist
+# =========================================================
+
+full_df['item_prev_price_change_available'] = (
+    (
+        full_df['item_has_price_history'] == 1
+    )
+    &
+    (
+        full_df['item_has_lag_2_history'] == 1
+    )
+).astype(int)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_prev_price_change'] = (
+    full_df['item_prev_price_change']
+    .fillna(0)
+)
+
+# =========================================================
+# PERCENTAGE CHANGE
+# =========================================================
+
+full_df['item_prev_price_change_pct'] = np.where(
+    full_df['item_has_lag_2_history'] == 1,
+    (
+        full_df['item_prev_price_change']
+        /
+        full_df['item_price_lag_2'].replace(0, 1)
+    ) * 100,
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# =========================================================
+
+full_df['item_prev_price_change_pct_available'] = (
+    full_df['item_prev_price_change_pct']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_prev_price_change_pct'] = (
+    full_df['item_prev_price_change_pct']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# ABSOLUTE CHANGE MAGNITUDE
+# =========================================================
+
+full_df['item_prev_price_change_abs'] = (
+    full_df['item_prev_price_change']
+    .abs()
+)
+
+# =========================================================
+# OPTIONAL:
+# PRICE DIRECTION
+# =========================================================
+
+full_df['item_price_direction'] = np.sign(
+    full_df['item_prev_price_change']
+)
+
+# values:
+# -1 = price decreased
+#  0 = unchanged/no history
+# +1 = price increased
+
+
+# =========================================================
+# MODEL-LEVEL EXPANDING FEATURES (SAFE)
+# =========================================================
+
+model_group = full_df.groupby(
+    ['shopId', 'itemId', 'modelId']
+)
+
+# =========================================================
+# HISTORICAL AVG PRICE
+# =========================================================
+
+full_df['model_avg_price_hist'] = (
+    model_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().mean()
+    )
+    .reset_index(level=[0,1,2], drop=True)
+)
+
+full_df['model_avg_price_hist_available'] = (
+    full_df['model_avg_price_hist']
+    .notna()
+    .astype(int)
+)
+
+full_df['model_avg_price_hist'] = (
+    full_df['model_avg_price_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL MIN PRICE
+# =========================================================
+
+full_df['model_price_min_hist'] = (
+    model_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().min()
+    )
+    .reset_index(level=[0,1,2], drop=True)
+)
+
+full_df['model_price_min_hist_available'] = (
+    full_df['model_price_min_hist']
+    .notna()
+    .astype(int)
+)
+
+full_df['model_price_min_hist'] = (
+    full_df['model_price_min_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL MAX PRICE
+# =========================================================
+
+full_df['model_price_max_hist'] = (
+    model_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().max()
+    )
+    .reset_index(level=[0,1,2], drop=True)
+)
+
+full_df['model_price_max_hist_available'] = (
+    full_df['model_price_max_hist']
+    .notna()
+    .astype(int)
+)
+
+full_df['model_price_max_hist'] = (
+    full_df['model_price_max_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# HISTORICAL VOLATILITY
+# =========================================================
+
+full_df['model_price_volatility_hist'] = (
+    model_group['price']
+    .apply(
+        lambda x: x.shift(1).expanding().std()
+    )
+    .reset_index(level=[0,1,2], drop=True)
+)
+
+full_df['model_price_volatility_hist_available'] = (
+    full_df['model_price_volatility_hist']
+    .notna()
+    .astype(int)
+)
+
+full_df['model_price_volatility_hist'] = (
+    full_df['model_price_volatility_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# HISTORY COUNT
+# =========================================================
+
+full_df['model_hist_observation_count'] = (
+    model_group.cumcount()
+)
+
+full_df['model_has_history'] = (
+    full_df['model_hist_observation_count'] > 0
+).astype(int)
+
+# =========================================================
+# MODEL-LEVEL PRICE POSITION FEATURES (SAFE)
+# =========================================================
+
+# ---------------------------------------------------------
+# POSITION IN HISTORICAL RANGE
+# ---------------------------------------------------------
+
+full_df['model_price_position_hist'] = np.where(
+
+    (
+        full_df['model_price_max_hist']
+        - full_df['model_price_min_hist']
+    ) != 0,
+
+    (
+        full_df['model_price_last_scrape']
+        - full_df['model_price_min_hist']
+    )
+    /
+    (
+        full_df['model_price_max_hist']
+        - full_df['model_price_min_hist']
+    ),
+
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# requires:
+# - history exists
+# - min/max history exists
+# =========================================================
+
+full_df['model_price_position_hist_available'] = (
+    (
+        full_df['model_has_price_history'] == 1
+    )
+    &
+    (
+        full_df['model_price_min_hist_available'] == 1
+    )
+    &
+    (
+        full_df['model_price_max_hist_available'] == 1
+    )
+).astype(int)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['model_price_position_hist'] = (
+    full_df['model_price_position_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# OUTSIDE HISTORICAL RANGE FLAGS
+# =========================================================
+
+full_df['model_price_above_hist_max'] = (
+    full_df['model_price_last_scrape']
+    > full_df['model_price_max_hist']
+).astype(int)
+
+full_df['model_price_below_hist_min'] = (
+    full_df['model_price_last_scrape']
+    < full_df['model_price_min_hist']
+).astype(int)
+
+# =========================================================
+# =========================================================
+# ITEM-LEVEL PRICE POSITION FEATURES (SAFE)
+# =========================================================
+# =========================================================
+
+# ---------------------------------------------------------
+# POSITION IN HISTORICAL RANGE
+# ---------------------------------------------------------
+
+full_df['item_price_position_hist'] = np.where(
+
+    (
+        full_df['item_price_max_hist']
+        - full_df['item_price_min_hist']
+    ) != 0,
+
+    (
+        full_df['item_price_last_scrape']
+        - full_df['item_price_min_hist']
+    )
+    /
+    (
+        full_df['item_price_max_hist']
+        - full_df['item_price_min_hist']
+    ),
+
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# =========================================================
+
+full_df['item_price_position_hist_available'] = (
+    (
+        full_df['item_has_price_history'] == 1
+    )
+    &
+    (
+        full_df['item_price_min_hist_available'] == 1
+    )
+    &
+    (
+        full_df['item_price_max_hist_available'] == 1
+    )
+).astype(int)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_price_position_hist'] = (
+    full_df['item_price_position_hist']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# OUTSIDE HISTORICAL RANGE FLAGS
+# =========================================================
+
+full_df['item_price_above_hist_max'] = (
+    full_df['item_price_last_scrape']
+    > full_df['item_price_max_hist']
+).astype(int)
+
+full_df['item_price_below_hist_min'] = (
+    full_df['item_price_last_scrape']
+    < full_df['item_price_min_hist']
+).astype(int)
+
+
+# =========================================================
+# MODEL-LEVEL TREND FEATURES (SAFE)
+# =========================================================
+
+# ---------------------------------------------------------
+# TREND PER DAY
+# ---------------------------------------------------------
+
+full_df['model_price_trend_per_day'] = np.where(
+
+    (
+        full_df['model_prev_price_change_available'] == 1
+    )
+    &
+    (
+        full_df['model_has_time_history'] == 1
+    )
+    &
+    (
+        full_df['model_days_since_last_scrape'] > 0
+    ),
+
+    (
+        full_df['model_prev_price_change']
+        /
+        full_df['model_days_since_last_scrape']
+    ),
+
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# =========================================================
+
+full_df['model_price_trend_per_day_available'] = (
+    full_df['model_price_trend_per_day']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['model_price_trend_per_day'] = (
+    full_df['model_price_trend_per_day']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# ABSOLUTE TREND
+# =========================================================
+
+full_df['model_price_trend_abs'] = (
+    full_df['model_price_trend_per_day']
+    .abs()
+)
+
+# =========================================================
+# OPTIONAL:
+# TREND DIRECTION
+# =========================================================
+
+full_df['model_price_trend_direction'] = np.sign(
+    full_df['model_price_trend_per_day']
+)
+
+
+# =========================================================
+# ITEM-LEVEL TIME FEATURES
+# =========================================================
+
+item_group = full_df.groupby(['shopId', 'itemId'])
+
+# ---------------------------------------------------------
+# DAYS SINCE LAST SCRAPE
+# ---------------------------------------------------------
+
+full_df['item_days_since_last_scrape'] = (
+    full_df['capturedAt']
+    - item_group['capturedAt'].shift(1)
+).dt.days
+
+# =========================================================
+# HISTORY FLAG
+# =========================================================
+
+full_df['item_has_time_history'] = (
+    full_df['item_days_since_last_scrape']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_days_since_last_scrape'] = (
+    full_df['item_days_since_last_scrape']
+    .fillna(0)
+    .astype(int)
+)
+
+# =========================================================
+# OPTIONAL:
+# DAYS SINCE FIRST SEEN
+# =========================================================
+
+full_df['item_days_since_first_seen'] = (
+    full_df['capturedAt']
+    - item_group['capturedAt'].transform('min')
+).dt.days
+
+
+
+# =========================================================
+# ITEM-LEVEL TREND FEATURES (SAFE)
+# =========================================================
+
+# ---------------------------------------------------------
+# TREND PER DAY
+# ---------------------------------------------------------
+
+full_df['item_price_trend_per_day'] = np.where(
+
+    (
+        full_df['item_prev_price_change_available'] == 1
+    )
+    &
+    (
+        full_df['item_has_time_history'] == 1
+    )
+    &
+    (
+        full_df['item_days_since_last_scrape'] > 0
+    ),
+
+    (
+        full_df['item_prev_price_change']
+        /
+        full_df['item_days_since_last_scrape']
+    ),
+
+    np.nan
+)
+
+# =========================================================
+# AVAILABILITY FLAG
+# =========================================================
+
+full_df['item_price_trend_per_day_available'] = (
+    full_df['item_price_trend_per_day']
+    .notna()
+    .astype(int)
+)
+
+# =========================================================
+# SAFE FILL
+# =========================================================
+
+full_df['item_price_trend_per_day'] = (
+    full_df['item_price_trend_per_day']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# ABSOLUTE TREND
+# =========================================================
+
+full_df['item_price_trend_abs'] = (
+    full_df['item_price_trend_per_day']
+    .abs()
+)
+
+# =========================================================
+# OPTIONAL:
+# TREND DIRECTION
+# =========================================================
+
+full_df['item_price_trend_direction'] = np.sign(
+    full_df['item_price_trend_per_day']
+)
+
+
+
+# =========================================================
+# DISCOUNT FEATURES (SAFE + PRODUCTION GRADE)
+# =========================================================
+
+# ---------------------------------------------------------
+# ORIGINAL PRICE AVAILABLE
+# ---------------------------------------------------------
+
+full_df['price_before_discount_available'] = (
+    full_df['priceBeforeDiscount']
+    .notna()
+    .astype(int)
+)
+
+# ---------------------------------------------------------
+# SAFE FILL
+# assumption:
+# missing original price = no discount
+# ---------------------------------------------------------
+
+full_df['priceBeforeDiscount'] = (
+    full_df['priceBeforeDiscount']
+    .fillna(full_df['price'])
+)
+
+# =========================================================
+# IS ON SALE
+# =========================================================
+
+full_df['is_on_sale'] = (
+    full_df['price']
+    < full_df['priceBeforeDiscount']
+).astype(int)
+
+# =========================================================
+# RAW DISCOUNT AMOUNT
+# =========================================================
+
+full_df['discount_amount'] = (
+    full_df['priceBeforeDiscount']
+    - full_df['price']
+)
+
+# =========================================================
+# DISCOUNT DEPTH
+# normalized discount intensity
+# =========================================================
+
+full_df['discount_depth'] = np.where(
+
+    full_df['priceBeforeDiscount'] > 0,
+
+    (
+        full_df['discount_amount']
+        /
+        full_df['priceBeforeDiscount']
+    ),
+
+    np.nan
+)
+
+# availability flag
+full_df['discount_depth_available'] = (
+    full_df['discount_depth']
+    .notna()
+    .astype(int)
+)
+
+# safe fill
+full_df['discount_depth'] = (
+    full_df['discount_depth']
+    .fillna(0)
+)
+
+# =========================================================
+# EFFECTIVE DISCOUNT %
+# if show_discount exists
+# =========================================================
+
+full_df['show_discount_available'] = (
+    full_df['show_discount']
+    .notna()
+    .astype(int)
+)
+
+full_df['effective_discount_pct'] = (
+    full_df['show_discount'] / 100
+)
+
+full_df['effective_discount_pct'] = (
+    full_df['effective_discount_pct']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# DISCOUNT VS HISTORICAL ITEM AVG
+# VERY POWERFUL FEATURE
+# =========================================================
+
+full_df['price_vs_item_hist_avg_pct'] = np.where(
+
+    full_df['item_avg_price_hist_available'] == 1,
+
+    (
+        (
+            full_df['price']
+            - full_df['item_avg_price_hist']
+        )
+        /
+        full_df['item_avg_price_hist'].replace(0, 1)
+    ) * 100,
+
+    np.nan
+)
+
+full_df['price_vs_item_hist_avg_pct_available'] = (
+    full_df['price_vs_item_hist_avg_pct']
+    .notna()
+    .astype(int)
+)
+
+full_df['price_vs_item_hist_avg_pct'] = (
+    full_df['price_vs_item_hist_avg_pct']
+    .fillna(0)
+)
+
+# =========================================================
+# OPTIONAL:
+# SHARP DISCOUNT FLAG
+# =========================================================
+
+full_df['is_sharp_discount'] = (
+    full_df['model_prev_price_change_pct'] < -20
+).astype(int)
+
+# =========================================================
+# POPULARITY FEATURES
+# =========================================================
+
+# ---------------------------------------------------------
+# SHOP POPULARITY
+# ---------------------------------------------------------
+
+full_df['shop_follower_count_available'] = (
+    full_df['shop_follower_count']
+    .notna()
+    .astype(int)
+)
+
+full_df['shop_follower_count'] = (
+    full_df['shop_follower_count']
+    .fillna(0)
+)
+
+full_df['shop_popularity'] = np.log1p(
+    full_df['shop_follower_count']
+)
+
+# =========================================================
+# ITEM POPULARITY
+# =========================================================
+
+full_df['total_rating_count_available'] = (
+    full_df['total_rating_count']
+    .notna()
+    .astype(int)
+)
+
+full_df['total_rating_count'] = (
+    full_df['total_rating_count']
+    .fillna(0)
+)
+
+full_df['item_popularity'] = np.log1p(
+    full_df['total_rating_count']
+)
+
+# =========================================================
+# REVIEW SCORE
+# =========================================================
+
+full_df['review_rating_available'] = (
+    full_df['review_rating']
+    .notna()
+    .astype(int)
+)
+
+# fill missing with neutral score
+full_df['review_rating'] = (
+    full_df['review_rating']
+    .fillna(0)
+)
+
+full_df['review_score_normalized'] = (
+    full_df['review_rating'] / 5.0
+)
+
+# =========================================================
+# OPTIONAL:
+# INTERACTION FEATURES
+# VERY STRONG FOR TREE MODELS
+# =========================================================
+
+full_df['discount_x_popularity'] = (
+    full_df['discount_depth']
+    * full_df['item_popularity']
+)
+
+full_df['discount_x_review_score'] = (
+    full_df['discount_depth']
+    * full_df['review_score_normalized']
+)
+
+
+
+for i, col in enumerate(full_df.columns, 1):
+    print(f"{i}. {col}")
+
+
+# =========================================================
+# LOG TRANSFORM FEATURES
+# =========================================================
+
+import numpy as np
+
+# =========================================================
+# HELPER FUNCTION
+# for features that can be negative
+# =========================================================
+
+def signed_log1p(x):
+    return np.sign(x) * np.log1p(np.abs(x))
+
+# =========================================================
+# POSITIVE FEATURES
+# =========================================================
+
+log_features = [
+
+    # -----------------------------------------------------
+    # ITEM HISTORICAL PRICE FEATURES
+    # -----------------------------------------------------
+
+    'item_avg_price_hist',
+    'item_price_min_hist',
+    'item_price_max_hist',
+    'item_price_volatility_hist',
+
+    # -----------------------------------------------------
+    # MODEL HISTORICAL PRICE FEATURES
+    # -----------------------------------------------------
+
+    'model_avg_price_hist',
+    'model_price_min_hist',
+    'model_price_max_hist',
+    'model_price_volatility_hist',
+
+    # -----------------------------------------------------
+    # LAG FEATURES
+    # -----------------------------------------------------
+
+    'item_price_last_scrape',
+    'item_price_lag_2',
+
+    'model_price_last_scrape',
+    'model_price_lag_2',
+
+    # -----------------------------------------------------
+    # DISCOUNT FEATURES
+    # -----------------------------------------------------
+
+    'discount_amount',
+    'priceBeforeDiscount',
+
+    # -----------------------------------------------------
+    # OBSERVATION / HISTORY FEATURES
+    # -----------------------------------------------------
+
+    'item_hist_observation_count',
+    'model_hist_observation_count',
+
+    # -----------------------------------------------------
+    # TIME FEATURES
+    # -----------------------------------------------------
+
+    'item_days_since_first_seen'
+]
+
+# =========================================================
+# CREATE LOG FEATURES
+# =========================================================
+
+for col in log_features:
+
+    if col in full_df.columns:
+
+        full_df[f'{col}_log1p'] = np.log1p(
+            full_df[col].clip(lower=0)
+        )
+
+# =========================================================
+# SIGNED FEATURES
+# =========================================================
+
+signed_features = [
+
+    # -----------------------------------------------------
+    # PRICE CHANGES
+    # -----------------------------------------------------
+
+    'model_prev_price_change',
+    'item_prev_price_change',
+
+    # -----------------------------------------------------
+    # PERCENTAGE CHANGES
+    # -----------------------------------------------------
+
+    'model_prev_price_change_pct',
+    'item_prev_price_change_pct',
+
+    # -----------------------------------------------------
+    # TREND FEATURES
+    # -----------------------------------------------------
+
+    'model_price_trend_per_day',
+    'item_price_trend_per_day'
+]
+
+# =========================================================
+# CREATE SIGNED LOG FEATURES
+# =========================================================
+
+for col in signed_features:
+
+    if col in full_df.columns:
+
+        full_df[f'{col}_signed_log1p'] = (
+            np.sign(full_df[col])
+            *
+            np.log1p(np.abs(full_df[col]))
+        )
+
+# =========================================================
+# OPTIONAL:
+# LOG TRANSFORM TARGET
+# =========================================================
+
+full_df['price_log1p'] = np.log1p(
+    full_df['price']
+)
+
+print("Log-transformed features created successfully.")
+
+
+# =========================================================
+# ITEM-LEVEL LOG-IQR OUTLIER DETECTION
+# ONLY FLAG:
+# - ABOVE UPPER BOUND
+# - is_on_sale == 0
+# =========================================================
+
+import numpy as np
+import pandas as pd
+
+# =========================================================
+# SANDBOX COPY
+# =========================================================
+
+full_df2 = full_df.copy()
+
+# =========================================================
+# PARAMETERS
+# =========================================================
+
+IQR_MULTIPLIER = 2
+MIN_ITEM_COUNT = 5
+
+# =========================================================
+# TRAIN DATA ONLY
+# =========================================================
+
+train_df2 = full_df2[
+    full_df2['tag2'] == 'TRAIN'
+].copy()
+
+# =========================================================
+# LOG PRICE
+# =========================================================
+
+train_df2['log_price'] = np.log1p(
+    train_df2['price']
+)
+
+full_df2['log_price'] = np.log1p(
+    full_df2['price']
+)
+
+# =========================================================
+# ITEM-LEVEL LOG-IQR STATS
+# =========================================================
+
+item_stats = (
+
+    train_df2
+    .groupby('itemId')['log_price']
+    .agg(
+        q1=lambda x: x.quantile(0.25),
+        q3=lambda x: x.quantile(0.75),
+        median='median',
+        count='count'
+    )
+)
+
+# =========================================================
+# IQR
+# =========================================================
+
+item_stats['iqr'] = (
+    item_stats['q3']
+    - item_stats['q1']
+)
+
+# =========================================================
+# LOWER / UPPER BOUNDS
+# =========================================================
+
+item_stats['lower_bound'] = (
+
+    item_stats['q1']
+    - IQR_MULTIPLIER * item_stats['iqr']
+)
+
+item_stats['upper_bound'] = (
+
+    item_stats['q3']
+    + IQR_MULTIPLIER * item_stats['iqr']
+)
+
+# =========================================================
+# MERGE BACK
+# =========================================================
+
+full_df2 = full_df2.merge(
+
+    item_stats[
+        [
+            'lower_bound',
+            'upper_bound',
+            'count'
+        ]
+    ],
+
+    on='itemId',
+    how='left'
+)
+
+# =========================================================
+# OUTLIER FLAG
+# ONLY:
+# - ABOVE UPPER BOUND
+# - NOT ON SALE
+# - ENOUGH HISTORY
+# =========================================================
+
+full_df2['item_log_iqr_outlier'] = np.where(
+
+    (
+        (full_df2['count'] >= MIN_ITEM_COUNT)
+        &
+        (full_df2['log_price'] > full_df2['upper_bound'])
+        &
+        (full_df2['is_on_sale'] == 0)
+    ),
+
+    1,
+
+    0
+)
+
+# =========================================================
+# DISTANCE ABOVE UPPER BOUND
+# =========================================================
+
+full_df2['item_iqr_distance'] = np.where(
+
+    full_df2['log_price']
+    > full_df2['upper_bound'],
+
+    full_df2['log_price']
+    - full_df2['upper_bound'],
+
+    0
+)
+
+# =========================================================
+# SUMMARY
+# =========================================================
+
+print("=" * 60)
+
+print(
+    f"Detected outliers: "
+    f"{full_df2['item_log_iqr_outlier'].sum():,}"
+)
+
+print("=" * 60)
+
+# =========================================================
+# VIEW EXAMPLES
+# =========================================================
+
+outlier_examples = full_df2[
+    full_df2['item_log_iqr_outlier'] == 1
+].copy()
+
+# =========================================================
+# SORT MOST EXTREME
+# =========================================================
+
+outlier_examples = outlier_examples.sort_values(
+    by='item_iqr_distance',
+    ascending=False
+)
+
+# =========================================================
+# DISPLAY WITH REFERENCE PRICES
+# =========================================================
+
+outlier_examples['lower_bound_price'] = np.expm1(
+    outlier_examples['lower_bound']
+)
+
+outlier_examples['upper_bound_price'] = np.expm1(
+    outlier_examples['upper_bound']
+)
+
+# =========================================================
+# DISPLAY COLUMNS
+# =========================================================
+
+display_cols = [
+
+    'capturedAt',
+
+    'shopId',
+    'itemId',
+    'modelId',
+
+    # current pricing
+    'price',
+    'priceBeforeDiscount',
+
+    # discount info
+    'is_on_sale',
+    'discount_amount',
+    'discount_depth',
+    'effective_discount_pct',
+    'is_sharp_discount',
+
+    # log price
+    'log_price',
+
+    # historical references
+    'item_avg_price_hist',
+    'item_price_min_hist',
+    'item_price_max_hist',
+
+    # IQR bounds
+    'lower_bound_price',
+    'upper_bound_price',
+
+    # anomaly strength
+    'item_iqr_distance',
+
+    # history count
+    'count'
+]
+
+# =========================================================
+# SHOW TOP OUTLIERS
+# =========================================================
+
+display(
+    outlier_examples[
+        display_cols
+    ].head(50)
+)
+
+# =========================================================
+# SEE TEMP COLUMNS CREATED
+# =========================================================
+
+new_cols = sorted(
+    list(
+        set(full_df2.columns)
+        -
+        set(full_df.columns)
+    )
+)
+
+print("\nNEW TEMPORARY COLUMNS:\n")
+
+for col in new_cols:
+    print(col)
+
+
+
+clean_df = full_df2[full_df2['item_log_iqr_outlier'] == 0]
+
+
+clean_df.shape
+
+
+
+# =========================================================
+# CONVERT 't' / 'f' STRING FLAGS TO INTEGER
+# =========================================================
+
+tf_cols = [
+
+    'is_official_shop',
+    'is_verified',
+    'is_preferred_plus_seller',
+
+    'is_free_shipping',
+    'is_pre_order'
+]
+
+for col in tf_cols:
+
+    clean_df[col] = (
+
+        clean_df[col]
+
+        .fillna('f')
+
+        .str.lower()
+
+        .map({
+            't': 1,
+            'f': 0
+        })
+
+        .astype(int)
+    )
+
+# =========================================================
+# XGBOOST PRICE PREDICTION PIPELINE
+# =========================================================
+
+import numpy as np
+import pandas as pd
+
+from xgboost import XGBRegressor
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error
+)
+
+# =========================================================
+# TRAIN / TEST SPLIT
+# =========================================================
+
+train_df = clean_df[
+    clean_df['tag2'] == 'TRAIN'
+].copy()
+
+test_df = clean_df[
+    clean_df['tag2'] != 'TRAIN'
+].copy()
+
+# =========================================================
+# FEATURES USED
+# =========================================================
+
+FEATURES = [
+
+    # -----------------------------------------------------
+    # CATEGORY / BRAND
+    # -----------------------------------------------------
+
+    'cat_id',
+    'brand_freq',
+    'brand_missing',
+
+    # -----------------------------------------------------
+    # TEMPORAL
+    # -----------------------------------------------------
+
+    'day_of_week',
+    'is_weekend',
+    'month',
+    'day_of_year',
+
+    'is_morning',
+    'is_afternoon',
+    'is_evening',
+
+    # -----------------------------------------------------
+    # SHOP FEATURES
+    # -----------------------------------------------------
+
+    'shop_rating',
+    'shop_response_rate',
+    'shop_response_rate_missing',
+
+    'shop_popularity',
+    'shop_follower_count_available',
+
+    'is_official_shop',
+    'is_verified',
+    'is_preferred_plus_seller',
+
+    # -----------------------------------------------------
+    # ITEM POPULARITY
+    # -----------------------------------------------------
+
+    'item_popularity',
+    'total_rating_count_available',
+
+    'review_score_normalized',
+    'review_rating_available',
+
+    'cmt_count',
+
+    # -----------------------------------------------------
+    # SHIPPING / FLAGS
+    # -----------------------------------------------------
+
+    'is_free_shipping',
+    'is_pre_order',
+
+    # -----------------------------------------------------
+    # DISCOUNT FEATURES
+    # -----------------------------------------------------
+
+    'is_on_sale',
+
+    'discount_amount_log1p',
+    'discount_depth',
+
+    'effective_discount_pct',
+
+    'is_sharp_discount',
+
+    'discount_x_popularity',
+    'discount_x_review_score',
+
+    # -----------------------------------------------------
+    # ITEM HISTORY
+    # -----------------------------------------------------
+
+    'item_has_history',
+
+    'item_avg_price_hist_log1p',
+    'item_price_min_hist_log1p',
+    'item_price_max_hist_log1p',
+
+    'item_price_volatility_hist_log1p',
+
+    'item_hist_observation_count_log1p',
+
+    # -----------------------------------------------------
+    # ITEM LAGS
+    # -----------------------------------------------------
+
+    'item_price_last_scrape_log1p',
+    'item_price_lag_2_log1p',
+
+    'item_has_price_history',
+    'item_has_lag_2_history',
+
+    # -----------------------------------------------------
+    # ITEM PRICE CHANGE
+    # -----------------------------------------------------
+
+    'item_prev_price_change_signed_log1p',
+    'item_prev_price_change_pct_signed_log1p',
+
+    'item_prev_price_change_abs',
+
+    'item_price_direction',
+
+    # -----------------------------------------------------
+    # ITEM TREND
+    # -----------------------------------------------------
+
+    'item_days_since_last_scrape',
+
+    'item_days_since_first_seen_log1p',
+
+    'item_price_trend_per_day_signed_log1p',
+
+    'item_price_trend_abs',
+    'item_price_trend_direction',
+
+    # -----------------------------------------------------
+    # ITEM POSITION
+    # -----------------------------------------------------
+
+    'item_price_position_hist',
+
+    'item_price_above_hist_max',
+    'item_price_below_hist_min',
+
+    # -----------------------------------------------------
+    # MODEL HISTORY
+    # -----------------------------------------------------
+
+    'model_has_history',
+
+    'model_avg_price_hist_log1p',
+    'model_price_min_hist_log1p',
+    'model_price_max_hist_log1p',
+
+    'model_price_volatility_hist_log1p',
+
+    'model_hist_observation_count_log1p',
+
+    # -----------------------------------------------------
+    # MODEL LAGS
+    # -----------------------------------------------------
+
+    'model_price_last_scrape_log1p',
+    'model_price_lag_2_log1p',
+
+    'model_has_price_history',
+    'model_has_lag_2_history',
+
+    # -----------------------------------------------------
+    # MODEL PRICE CHANGE
+    # -----------------------------------------------------
+
+    'model_prev_price_change_signed_log1p',
+    'model_prev_price_change_pct_signed_log1p',
+
+    'model_prev_price_change_abs',
+
+    'model_price_direction',
+
+    # -----------------------------------------------------
+    # MODEL TREND
+    # -----------------------------------------------------
+
+    'model_days_since_last_scrape',
+
+    'model_price_trend_per_day_signed_log1p',
+
+    'model_price_trend_abs',
+    'model_price_trend_direction',
+
+    # -----------------------------------------------------
+    # MODEL POSITION
+    # -----------------------------------------------------
+
+    'model_price_position_hist',
+
+    'model_price_above_hist_max',
+    'model_price_below_hist_min',
+
+    # -----------------------------------------------------
+    # AVAILABILITY TAGS POSITION
+    # -----------------------------------------------------
+
+
+    'stock_available',
+
+    'item_avg_price_hist_available',
+    'item_price_min_hist_available',
+    'item_price_max_hist_available',
+    'item_price_volatility_hist_available',
+
+    'model_avg_price_hist_available',
+    'model_price_min_hist_available',
+    'model_price_max_hist_available',
+    'model_price_volatility_hist_available',
+
+    'item_prev_price_change_available',
+    'item_prev_price_change_pct_available',
+
+    'model_prev_price_change_available',
+    'model_prev_price_change_pct_available',
+
+    'model_price_7d_avg_hist_available',
+
+    'model_price_position_hist_available',
+    'item_price_position_hist_available',
+
+    'discount_depth_available',
+    'show_discount_available',
+
+    'price_before_discount_available',
+
+    'price_vs_item_hist_avg_pct_available',
+
+    'price_vs_item_hist_avg_pct'
+]
+
+# =========================================================
+# TARGET
+# =========================================================
+
+TARGET = 'price_log1p'
+
+# =========================================================
+# PREPARE X / Y
+# =========================================================
+
+X_train = train_df[FEATURES]
+y_train = train_df[TARGET]
+
+X_test = test_df[FEATURES]
+y_test = test_df[TARGET]
+
+# =========================================================
+# XGBOOST MODEL
+# =========================================================
+
+model = XGBRegressor(
+
+    n_estimators=500,
+    learning_rate=0.03,
+
+    max_depth=8,
+
+    min_child_weight=5,
+
+    subsample=0.8,
+    colsample_bytree=0.8,
+
+    reg_alpha=1,
+    reg_lambda=1,
+
+    objective='reg:squarederror',
+
+    random_state=42,
+
+    n_jobs=-1
+)
+
+# =========================================================
+# TRAIN
+# =========================================================
+
+model.fit(
+    X_train,
+    y_train
+)
+
+# =========================================================
+# PREDICT
+# =========================================================
+
+pred_log = model.predict(X_test)
+
+# back-transform
+pred_price = np.expm1(pred_log)
+
+actual_price = np.expm1(y_test)
+
+# =========================================================
+# EVALUATION
+# =========================================================
+
+rmse = np.sqrt(
+    mean_squared_error(
+        actual_price,
+        pred_price
+    )
+)
+
+mae = mean_absolute_error(
+    actual_price,
+    pred_price
+)
+
+mape = (
+    np.abs(
+        (actual_price - pred_price)
+        /
+        actual_price.clip(lower=1)
+    ).mean()
+) * 100
+
+# =========================================================
+# RESULTS
+# =========================================================
+
+print("=" * 60)
+
+print(f"FEATURE COUNT: {len(FEATURES)}")
+
+print("=" * 60)
+
+print(f"RMSE : {rmse:,.2f}")
+print(f"MAE  : {mae:,.2f}")
+print(f"MAPE : {mape:.2f}%")
+
+print("=" * 60)
+
+# =========================================================
+# FEATURE IMPORTANCE
+# =========================================================
+
+feature_importance = pd.DataFrame({
+
+    'feature': FEATURES,
+
+    'importance': model.feature_importances_
+})
+
+feature_importance = feature_importance.sort_values(
+    by='importance',
+    ascending=False
+)
+
+display(
+    feature_importance.head(10)
+)
+
+# =========================================================
+# PREDICTION SAMPLE
+# =========================================================
+
+pred_df = test_df.copy()
+
+pred_df['pred_price'] = pred_price
+pred_df['actual_price'] = actual_price
+
+pred_df['abs_error'] = (
+    pred_df['actual_price']
+    -
+    pred_df['pred_price']
+).abs()
+
+pred_df['pct_abs_error'] = (
+    pred_df['abs_error']/
+    pred_df['actual_price']
+).abs()
+
+display_cols = [
+
+    'shopId',
+    'itemId',
+    'modelId',
+
+    'actual_price',
+    'pred_price',
+
+    'abs_error',
+    'pct_abs_error'
+]
+
+display(
+    pred_df[
+        display_cols
+    ].sort_values(
+        by='abs_error',
+        ascending=False
+    ).head(5)
+)
+
+
+
+
